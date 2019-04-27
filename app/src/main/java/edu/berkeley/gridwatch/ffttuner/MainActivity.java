@@ -43,6 +43,8 @@ public class MainActivity extends AppCompatActivity {
 
     private AudioDispatcher dispatcher;
 
+    Thread audioThread;
+
     private RxPermissions getRxPermissions() {
         if (mPermissions == null) {
             mPermissions = new RxPermissions(this);
@@ -73,6 +75,11 @@ public class MainActivity extends AppCompatActivity {
                     startbtn.setText("Start");
                     mIsRecording = false;
                     state_txt.setText("stopped");
+                    try {
+                        audioThread.stop();
+                    } catch (Exception e) {
+                        Log.e("error", e.getMessage());
+                    }
                 } else {
                     boolean isPermissionsGranted = getRxPermissions().isGranted(RECORD_AUDIO);
 
@@ -123,7 +130,8 @@ public class MainActivity extends AppCompatActivity {
                     System.arraycopy(audioFloatBuffer, 0, transformbuffer, 0, audioFloatBuffer.length);
                     fft.forwardTransform(transformbuffer);
                     fft.modulus(transformbuffer, amplitudes);
-                    
+
+
                     Log.e("amp", amplitudes.toString());
                     Log.e("fft", fft.toString());
 
@@ -132,8 +140,8 @@ public class MainActivity extends AppCompatActivity {
 
             };
             dispatcher.addAudioProcessor(fftProcessor);
-            new Thread(dispatcher,"Audio dispatching").start();
-
+            audioThread = new Thread(dispatcher,"Audio dispatching");
+            audioThread.start();
         } catch (IllegalStateException e) {
             Log.e("error", e.getMessage());
         }
