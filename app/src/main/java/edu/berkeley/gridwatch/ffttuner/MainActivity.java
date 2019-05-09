@@ -1,8 +1,12 @@
 package edu.berkeley.gridwatch.ffttuner;
 
 import android.annotation.SuppressLint;
+import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Parcelable;
+import android.os.ResultReceiver;
 import android.support.design.widget.FloatingActionButton;
 import android.support.design.widget.Snackbar;
 import android.support.v7.app.AppCompatActivity;
@@ -18,10 +22,13 @@ import android.widget.Toast;
 
 import com.tbruyelle.rxpermissions2.RxPermissions;
 
+import java.math.RoundingMode;
+import java.text.DecimalFormat;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Random;
 
 import be.tarsos.dsp.AudioDispatcher;
 import be.tarsos.dsp.AudioEvent;
@@ -35,13 +42,30 @@ import static android.Manifest.permission.WRITE_EXTERNAL_STORAGE;
 public class MainActivity extends AppCompatActivity {
 
     private Button startbtn;
+    private Button spambtn;
+
     private TextView state_txt;
 
     private TextView display_txt_view;
 
+    private boolean mFFTStarted = false;
+    private boolean mFFTFinished = false;
+
+    private static String mFFTArray = "";
+    private static String mFFTMsg = "";
+
+    private final int sampleRate = 22050;
+    private final int fftsize = 32768/2;
+    private final int overlap = fftsize/2;
+
+    private static WorkEventResultReceiver m_resultReceiver;
+
+
     String display_txt_str = "-1";
 
-    int UI_update_rate_ms = 2000;
+    //int UI_update_rate_ms = 2000;
+
+    private Handler ui_update;
 
     private RxPermissions mPermissions;
     //private StreamAudioRecorder mStreamAudioRecorder;
@@ -50,13 +74,7 @@ public class MainActivity extends AppCompatActivity {
     //private FileOutputStream mFileOutputStream;
     private boolean mIsRecording = false;
 
-    private final int sampleRate = 22050;
-    private final int fftsize = 32768/2;
-    private final int overlap = fftsize/2;
 
-    private AudioDispatcher dispatcher;
-
-    Thread audioThread;
 
     private RxPermissions getRxPermissions() {
         if (mPermissions == null) {
@@ -67,26 +85,52 @@ public class MainActivity extends AppCompatActivity {
 
 
 
+    private void stop_ui() {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                startbtn.setText("Start");
+                spambtn.setText("Start");
+                mIsRecording = false;
+                state_txt.setText("stopped");
+            }
+        });
+
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.home);
 
+        setRequestedOrientation (ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+
+        m_resultReceiver = new WorkEventResultReceiver(null);
+
+
+
         //Handle UI
         startbtn = (Button) findViewById(R.id.startbtn);
+        spambtn = (Button) findViewById(R.id.spam_button);
+
         state_txt = (TextView) findViewById(R.id.state_text);
         display_txt_view = (TextView) findViewById(R.id.display_text);
-        final Handler handler = new Handler();
-        handler.postDelayed(new Runnable() {
+
+        /*
+        ui_update = new Handler();
+        ui_update.postDelayed(new Runnable() {
             @Override
             public void run() {
-                Log.e("display", display_txt_str);
-                display_txt_view.setText(display_txt_str);
-                handler.postDelayed(this, UI_update_rate_ms);
+                if (mIsRecording) {
+                    Log.e("display", display_txt_str);
+                    display_txt_view.setText(display_txt_str);
+                } else {
+                    Log.e("display", "no longer recording");
+                }
+                ui_update.postDelayed(this, UI_update_rate_ms);
             }
         }, UI_update_rate_ms);
-
+        */
 
         //Handle Permissions
         boolean isPermissionsGranted = getRxPermissions().isGranted(RECORD_AUDIO);
@@ -100,14 +144,8 @@ public class MainActivity extends AppCompatActivity {
             public void onClick(View v) {
                 if (mIsRecording) {
                     //stopRecord();
-                    startbtn.setText("Start");
-                    mIsRecording = false;
-                    state_txt.setText("stopped");
-                    try {
-                        audioThread.interrupt();
-                    } catch (Exception e) {
-                        Log.e("error", "stopping thread: " + e.getLocalizedMessage());
-                    }
+                    stop_ui();
+                    stopFFT();
                 } else {
                     boolean isPermissionsGranted = getRxPermissions().isGranted(RECORD_AUDIO);
 
@@ -124,87 +162,113 @@ public class MainActivity extends AppCompatActivity {
                                     }
                                 }, Throwable::printStackTrace);
                     } else {
-                        doFFT(); //MAIN CALL
+                        //doFFT(); //MAIN CALL
+                        AudioDispatcher dispatcher = AudioDispatcherFactory.fromDefaultMicrophone(sampleRate, fftsize, overlap);
+                        ((FFTTuner) getApplication()).setDispatcher(dispatcher);
                         startbtn.setText("Stop");
                         mIsRecording = true;
                         state_txt.setText("running");
+                        startFFT();
                     }
                 }
 
             }
         });
 
-    }
-
-    private void doFFT() {
-
-        try {
-            dispatcher = AudioDispatcherFactory.fromDefaultMicrophone(sampleRate, fftsize, overlap);
-
-            AudioProcessor fftProcessor = new AudioProcessor(){
-
-                FFT fft = new FFT(fftsize);
-                float[] amplitudes = new float[fftsize/2];
-
-                @Override
-                public void processingFinished() {
-                    // TODO Auto-generated method stub
-                }
-
-
-
-                @Override
-                public boolean process(AudioEvent audioEvent) {
-                    float[] audioFloatBuffer = audioEvent.getFloatBuffer();
-                    float[] transformbuffer = new float[fftsize*2];
-                    System.arraycopy(audioFloatBuffer, 0, transformbuffer, 0, audioFloatBuffer.length);
-                    fft.forwardTransform(transformbuffer);
-                    fft.modulus(transformbuffer, amplitudes);
-
-                    //Log.i("amp", Arrays.toString(amplitudes));
-
-
-                    display_txt_str = "";
-
-                    for(int i = 0; i < audioFloatBuffer.length; i++){
-                        float hz = (float) fft.binToHz(i, sampleRate);
-                        try {
-                            if (i <= amplitudes.length) {
-                                float mag = amplitudes[i];
-
-                                if (hz >= 54 && hz <= 66 ||
-                                        hz >= 114 && hz <= 126 ||
-                                        hz >= 174 && hz <= 186 ||
-                                        hz >= 234 && hz <= 246 ||
-                                        hz >= 294 && hz <= 306) {
-                                    //Log.i("fft", String.valueOf(hz) + "," + String.valueOf(mag));
-                                    display_txt_str = display_txt_str + String.valueOf(hz) + "\t\t" + String.valueOf(mag) + "\n";
+        spambtn.setOnClickListener(new View.OnClickListener() {
+            @SuppressLint("CheckResult")
+            @Override
+            public void onClick(View v) {
+                boolean isPermissionsGranted = getRxPermissions().isGranted(RECORD_AUDIO);
+                if (!isPermissionsGranted) {
+                    getRxPermissions()
+                            .request(RECORD_AUDIO)
+                            .subscribe(granted -> {
+                                if (granted) {
+                                    Toast.makeText(getApplicationContext(), "Permission granted",
+                                            Toast.LENGTH_SHORT).show();
+                                } else {
+                                    Toast.makeText(getApplicationContext(),
+                                            "Permission not granted", Toast.LENGTH_SHORT).show();
                                 }
-                            } else { //*****TODO**** This happens a lot... index into amplitudes might be wrong...
-                                //Log.e("error", "i:" + String.valueOf(i) + " " + "length:" + String.valueOf(amplitudes.length));
+                            }, Throwable::printStackTrace);
+                } else {
+                    //doFFT(); //MAIN CALL
+                    AudioDispatcher dispatcher = AudioDispatcherFactory.fromDefaultMicrophone(sampleRate, fftsize, overlap);
+                    ((FFTTuner) getApplication()).setDispatcher(dispatcher);
+                    spambtn.setText("Stop");
+                    mIsRecording = true;
+                    state_txt.setText("spamming");
+                    final Handler handler = new Handler();
+                    handler.postDelayed(new Runnable() {
+                        @Override
+                        public void run() {
+                            //Do something after 100ms
+                            Log.e("spam", "restarting");
+                            startFFT();
+                            Random rand = new Random();
+                            boolean val = rand.nextInt(25)==0;
+                            if (!val) { // reschedule for a bit
+                                handler.postDelayed(this, 100);
                             }
                         }
-                        catch (Exception e) {
-                            Log.e("error", "in process, " + e.getLocalizedMessage());
-                        }
-
-                    }
-
-                    //Log.e("amp", amplitudes.toString());
-                    //Log.e("fft", fft.toString());
-
-
-                    return true;
+                    }, 100);
                 }
+            }
+        });
 
-            };
-            dispatcher.addAudioProcessor(fftProcessor);
-            audioThread = new Thread(dispatcher,"Audio dispatching");
-            audioThread.start();
-        } catch (IllegalStateException e) {
-            Log.e("error", e.getMessage());
+    }
+
+    private void startFFT() {
+        mFFTStarted = true;
+        launch_service(FFTService.class, IntentConfig.START);
+    }
+
+    private void stopFFT() {
+        mFFTStarted = true;
+        launch_service(FFTService.class, IntentConfig.STOP);
+    }
+
+    private void launch_service(Class a, String msg) {
+        Intent intent = new Intent(this, a);
+        intent.putExtra(IntentConfig.RECEIVER_KEY, m_resultReceiver);
+        if (msg != null) {
+            Log.e("starting with message", msg);
+            intent.putExtra(IntentConfig.MESSAGE_KEY, msg);
+        }
+        this.startService(intent);
+    }
+
+    class WorkEventResultReceiver extends ResultReceiver
+    {
+        public WorkEventResultReceiver(Handler handler) {
+            super(handler);
+        }
+
+        @Override
+        protected void onReceiveResult(int resultCode, Bundle resultData) {
+            if (resultCode == IntentConfig.FFT) {
+                Log.e("received", "FFT");
+                mFFTArray = resultData.getString(IntentConfig.FFT_ARRAY);
+                mFFTMsg = resultData.getString(IntentConfig.MESSAGE_KEY);
+                if (mFFTMsg != null) {
+                    if (mFFTMsg.equals(IntentConfig.DONE)) {
+                        Log.e("ui", "done");
+                        mFFTFinished = true;
+                        stop_ui();
+                    } else {
+                        Log.e("ui", "updating");
+                        Log.e("ui", mFFTMsg);
+                        display_txt_str = mFFTMsg;
+                    }
+                }
+            }
         }
     }
+
+
+
+
 
 
 }
